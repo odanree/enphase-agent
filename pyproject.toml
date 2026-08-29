@@ -1,0 +1,74 @@
+[project]
+name = "enphase-agent"
+version = "0.1.0"
+description = "Unofficial home-battery control agent over Enphase's undocumented Enlighten / IQ Gateway API"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Danh Le" }]
+dependencies = [
+    "pyenphase>=1.20",
+    "pybreaker>=1.2",
+    "typer>=0.12",
+    "rich>=13.0",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+enphase-agent = "enphase_agent.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-mock>=3.14",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["enphase_agent"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "SIM", "RUF"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Typer's declarative defaults are calls by design.
+extend-immutable-calls = ["typer.Argument", "typer.Option"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+# Strict on the ACL: it's the module where a silent Any would let an Enphase
+# shape leak upstream.
+[[tool.mypy.overrides]]
+module = "enphase_agent.adapter"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_any_generics = true
+warn_return_any = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = "enphase_agent.cli"
+disallow_untyped_defs = false
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["pyenphase.*", "pybreaker.*"]
+ignore_missing_imports = true
