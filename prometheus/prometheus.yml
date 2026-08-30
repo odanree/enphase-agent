@@ -1,0 +1,13 @@
+# Pull-based scrape config: Prometheus fetches /metrics from the agent.
+# 15s matches the daemon's own gateway-scrape cadence — sampling faster
+# than the data changes only buys duplicate points.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  external_labels:
+    env: home
+
+scrape_configs:
+  - job_name: enphase-agent
+    static_configs:
+      - targets: ["enphase-agent:8000"]

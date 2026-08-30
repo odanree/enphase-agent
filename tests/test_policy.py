@@ -15,8 +15,16 @@ def fake_adapter() -> AsyncMock:
 
 
 @pytest.fixture
-def policy(fake_adapter, clock) -> BatteryPolicy:
-    return BatteryPolicy(fake_adapter, now_fn=clock)
+def writes() -> list[tuple[str, str]]:
+    return []
+
+
+@pytest.fixture
+def policy(fake_adapter, clock, writes) -> BatteryPolicy:
+    # Stub recorder: keeps tests off the process-global Prometheus counters.
+    return BatteryPolicy(
+        fake_adapter, now_fn=clock, record_write=lambda a, o: writes.append((a, o))
+    )
 
 
 async def test_bulkhead_rejects_fifth_change_same_day(policy, fake_adapter):
@@ -58,3 +66,18 @@ async def test_reserve_out_of_bounds_rejected(policy, fake_adapter, pct):
 async def test_reserve_in_bounds_passes(policy, fake_adapter, pct):
     await policy.set_reserve_soc(pct, reason="test")
     fake_adapter.set_reserve_soc.assert_awaited_once_with(pct, "test")
+
+
+async def test_write_audit_records_every_outcome(policy, fake_adapter, writes):
+    await policy.set_battery_mode(BatteryMode.SAVINGS, reason="test")
+    with pytest.raises(PolicyRejected):
+        await policy.set_battery_mode(BatteryMode.FULL_BACKUP, reason="storm")
+    fake_adapter.set_reserve_soc.side_effect = RuntimeError("gateway down")
+    with pytest.raises(RuntimeError):
+        await policy.set_reserve_soc(0.30, reason="test")
+
+    assert writes == [
+        ("set_mode", "success"),
+        ("set_mode", "rejected"),
+        ("set_reserve", "error"),
+    ]

@@ -51,5 +51,8 @@ VOLUME ["/data"]
 
 USER app
 
+# Prometheus scrapes this port (pull-based metrics — we never push).
+EXPOSE 8000
+
 ENTRYPOINT ["enphase-agent"]
-CMD ["status"]
+CMD ["daemon"]

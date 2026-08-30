@@ -2,6 +2,13 @@
 
 ## [0.1.0] - unreleased
 
+- Observability stack:
+  - Prometheus `/metrics` endpoint (`prometheus_client`): RED-method service metrics for the adapter (scrape rate / errors-by-kind / duration histogram, breaker state) plus domain gauges for the battery (production, consumption, SoC, reserve, one-hot mode, storm guard, `state_age_seconds` freshness SLI). Closed label vocabularies enforced in `metrics.py` (cardinality discipline).
+  - `daemon` CLI command / `daemon.py`: pull-based scraper loop (15s), bulkheaded per iteration — a failed `get_state` bumps `enphase_scrape_errors_total{kind=...}` and the loop continues; SIGTERM/SIGINT shut down cleanly (adapter session closed, exit 0). Container default CMD is now `daemon`.
+  - `enphase_writes_total{action,outcome}` audit counter bumped from the policy layer via an injected recorder (tests stub it; success/rejected/error outcomes).
+  - Grafana + Prometheus sidecars in compose: all mutable state (Prometheus TSDB, Grafana DB, agent data) on **named volumes**; config and provisioning files are read-only bind mounts (safe — the virtiofs/9P fcntl bug only affects lock-hungry databases).
+  - Starter 3-panel provisioned dashboard (stable UID): Solar vs Consumption, Battery SoC gauge, Health SLI (state age + error rate); every panel description explains its PromQL and what unhealthy looks like.
+
 - Initial thin slice: adapter (anti-corruption layer over pyenphase), policy guardrails, deterministic rules engine, Typer CLI, tests.
 - Live-hardware spike against IQ Gateway (pyenphase 4.0.1):
   - Confirmed `EnvoyStorageMode` members, `set_storage_mode` / `set_reserve_soc` signatures, `EnvoyData` field shapes; TODO(verify) marks cleared.

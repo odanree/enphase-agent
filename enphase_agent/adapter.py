@@ -63,6 +63,15 @@ class _AsyncCircuitBreaker:
         self._opened_at: float | None = None
         self._lock = asyncio.Lock()
 
+    @property
+    def is_open(self) -> bool:
+        """Snapshot for observability. Lock-free read is fine: single event
+        loop, and a one-iteration-stale gauge is harmless."""
+        return (
+            self._opened_at is not None
+            and time.monotonic() - self._opened_at < self._reset_timeout
+        )
+
     async def call_async(self, fn: Callable[..., Awaitable[Any]], *args: Any) -> Any:
         async with self._lock:
             if self._opened_at is not None:
@@ -180,6 +189,12 @@ class EnphaseAdapter:
         logger.info("set_reserve_soc -> %.0f%%: %s", pct * 100, reason)
         envoy = await self._ready_envoy()
         await self._call(envoy.set_reserve_soc, round(pct * 100))
+
+    def is_circuit_open(self) -> bool:
+        """Breaker state for the metrics daemon. Exposed here so callers
+        never reach into `_AsyncCircuitBreaker` — the ACL boundary covers
+        our own internals, not just Enphase's."""
+        return self._breaker.is_open
 
     async def close(self) -> None:
         """Release the underlying aiohttp session. Safe to call on a never-used

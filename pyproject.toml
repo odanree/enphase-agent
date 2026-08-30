@@ -12,6 +12,7 @@ dependencies = [
     "rich>=13.0",
     "httpx>=0.27",
     "python-dotenv>=1.0",
+    "prometheus_client>=0.20",
 ]
 
 [project.scripts]
@@ -58,6 +59,16 @@ no_implicit_optional = true
 # shape leak upstream.
 [[tool.mypy.overrides]]
 module = "enphase_agent.adapter"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_any_generics = true
+warn_return_any = true
+strict_equality = true
+
+# Strict on the observability path too: a mistyped label dict or a str
+# where a float belongs would only surface at scrape time otherwise.
+[[tool.mypy.overrides]]
+module = ["enphase_agent.metrics", "enphase_agent.daemon"]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 disallow_any_generics = true

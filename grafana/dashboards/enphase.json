@@ -1,0 +1,149 @@
+{
+  "uid": "enphase-home",
+  "title": "Enphase Battery",
+  "tags": ["enphase", "home"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "annotations": { "list": [] },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Solar vs Consumption",
+      "description": "Two raw gauges plotted over time: enphase_production_watts (what the panels are making) and enphase_consumption_watts (what the house is using). No PromQL operators needed — gauges are instantaneous values, so plotting the raw series IS the query. Unhealthy: production flatlining at 0 during daylight (array or gateway problem), or either series going stale/gappy (daemon or Prometheus down — cross-check the Health SLI panel).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "enphase_production_watts",
+          "legendFormat": "Production",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "refId": "B",
+          "expr": "enphase_consumption_watts",
+          "legendFormat": "Consumption",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "gauge",
+      "title": "Battery SoC",
+      "description": "enphase_battery_soc_ratio * 100 — the exporter publishes state of charge as a 0-1 ratio (Prometheus naming convention), and the `* 100` scalar multiplication converts it to percent for display. Unhealthy: red below 20% (approaching the backup floor — the battery can no longer ride out an outage), yellow below 40%.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 20 },
+              { "color": "green", "value": 40 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "enphase_battery_soc_ratio * 100",
+          "legendFormat": "SoC",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Scrape freshness + error rate",
+      "description": "The service-health (SLI) panel — this is where an SLO would hang, e.g. 'state age under 60s for 99% of 30 days'. Series 1: enphase_state_age_seconds, seconds since the last successful gateway read; with a 15s scrape loop it should hover near 15. Yellow past 30s, red past 60s means the daemon is being served stale cache (gateway down, breaker open). Series 2: rate(enphase_scrape_total{outcome=\"error\"}[5m]) — `rate()` converts the ever-increasing error counter into errors-per-second averaged over a sliding 5-minute window; healthy is a flat line at 0. Age climbing while error rate stays 0 means the daemon itself died (Prometheus will also mark the target down).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": { "mode": "dashed" }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 30 },
+              { "color": "red", "value": 60 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Error rate (5m)" },
+            "properties": [
+              { "id": "unit", "value": "ops" },
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "enphase_state_age_seconds",
+          "legendFormat": "State age (s)",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "refId": "B",
+          "expr": "rate(enphase_scrape_total{outcome=\"error\"}[5m])",
+          "legendFormat": "Error rate (5m)",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ]
+    }
+  ]
+}

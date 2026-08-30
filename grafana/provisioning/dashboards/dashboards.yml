@@ -1,0 +1,11 @@
+# File-based dashboard provider: dashboards live in git, not clickops.
+# Stable UIDs in the JSON mean a re-provision updates in place.
+apiVersion: 1
+
+providers:
+  - name: enphase
+    type: file
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

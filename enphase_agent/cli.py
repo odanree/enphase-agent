@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import Awaitable, Callable
 from enum import Enum
@@ -16,6 +17,7 @@ from rich.table import Table
 load_dotenv()
 
 from .adapter import EnphaseAdapter
+from .daemon import DEFAULT_INTERVAL_S, DEFAULT_PORT, run_daemon
 from .errors import EnphaseAgentError
 from .models import BatteryMode, SystemState
 from .policy import BatteryPolicy
@@ -112,6 +114,25 @@ def set_reserve(
     """Set the battery reserve SoC through the policy guardrails."""
     _run(lambda a: BatteryPolicy(a).set_reserve_soc(pct, reason=reason))
     console.print(f"[green]Reserve set to {pct:.0%}[/green]")
+
+
+@app.command()
+def daemon(
+    interval: float = typer.Option(
+        DEFAULT_INTERVAL_S, help="Seconds between gateway scrapes."
+    ),
+    port: int = typer.Option(DEFAULT_PORT, help="Port for the Prometheus /metrics endpoint."),
+) -> None:
+    """Run the pull-based metrics daemon (Prometheus scrapes us; we never push)."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    try:
+        _run(lambda a: run_daemon(a, interval_s=interval, port=port))
+    except KeyboardInterrupt:
+        # Windows dev host: no loop signal handlers, Ctrl+C lands here.
+        # run_daemon's finally already closed the adapter.
+        raise typer.Exit(0) from None
 
 
 @app.command()
