@@ -10,3 +10,4 @@
   - Load `.env` on CLI import via `python-dotenv`.
   - Added `EnphaseAdapter.close()` + `__aenter__/__aexit__`; CLI now closes the aiohttp session on exit.
   - `enable_storm_guard` raises `NotImplementedError` — pyenphase 4.0.1 does not expose the write; needs a raw Enlighten cloud call in a follow-up.
+- Containerization: multi-stage `Dockerfile` (uv build → python:3.11-slim runtime, non-root user), `docker-compose.yml`, `.dockerignore`. Data mounted at `/data` via a **named** Docker volume — deliberately not a bind-mount, because SQLite's fcntl advisory locks don't forward reliably through Docker Desktop's virtiofs / WSL2's 9P, so a bind-mounted DB pseudo-locks the moment the host touches the file.

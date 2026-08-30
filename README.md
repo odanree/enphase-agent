@@ -38,13 +38,26 @@ enphase-agent plan            # tomorrow's schedule from the rules engine
 enphase-agent plan --storm    # what the plan looks like under a storm forecast
 ```
 
+## Docker
+
+The container ships with its `/data` mount point pre-created and pointed at a **named Docker volume**, not a bind mount. This is deliberate: SQLite uses POSIX advisory locks (`fcntl`), and Docker Desktop's virtiofs (Windows/macOS) / WSL2's 9P do not reliably forward those locks across the host↔container boundary — a bind-mounted SQLite DB gets pseudo-locked the moment anything on the host touches the file. Named volumes stay entirely inside Docker's storage layer and dodge the bug.
+
+```sh
+docker compose build
+docker compose run --rm enphase-agent status
+docker compose run --rm enphase-agent set-mode savings --reason "off-peak"
+docker compose run --rm enphase-agent plan
+```
+
+The container needs LAN reachability to the Gateway. Default bridge networking works when the Docker host can already route to it.
+
 ## Architecture
 
 **Anti-corruption layer** (`adapter.py`). The adapter is the only module that knows Enphase's shapes; callers see our `SystemState` / `BatteryMode`. When Enphase renames a field or pyenphase changes its models, the blast radius is one file.
 
 **Fail-fast at the trust boundary, graceful degradation on the runtime path.** Bad credentials raise `AuthError` on the first call — an auth problem should never be discovered hours into a control loop. But runtime flakiness (gateway offline, cloud hiccup) degrades instead of failing: `get_state` serves the cached snapshot, flags it `stale` once it's older than 10 minutes, and stale state hard-blocks writes via `StaleStateError` — reads may be old, actuation on old data may not.
 
-**Circuit breaker** (`pybreaker`, fail_max=5, reset_timeout=300s). The IQ Gateway is a small embedded box; when it's down, pounding it helps nobody. After 5 consecutive failures the breaker opens, calls fail fast for 5 minutes, and reads fall back to the stale cache.
+**Circuit breaker** (asyncio-native, fail_max=5, reset_timeout=300s). The IQ Gateway is a small embedded box; when it's down, pounding it helps nobody. After 5 consecutive failures the breaker opens, calls fail fast for 5 minutes, and reads fall back to the stale cache. Auth errors are excluded — a 401 is a trust-boundary problem, not an availability signal, so it fails fast instead of tripping us open.
 
 **Token-bucket rate limiter.** A 2-second floor between outbound calls, enforced inside the adapter so no caller — including a future scheduler bug — can hammer the gateway.
 

@@ -1,0 +1,27 @@
+# One-shot invocation model for now — no long-running daemon yet.
+#
+#   docker compose build
+#   docker compose run --rm enphase-agent status
+#   docker compose run --rm enphase-agent set-mode savings --reason "off-peak"
+#   docker compose run --rm enphase-agent plan
+#
+# The named volume `enphase_data` persists the SQLite ledger across
+# container recreations. Do NOT swap it for a `./data:/data` bind mount —
+# SQLite's fcntl advisory locks do not forward reliably through Docker
+# Desktop's virtiofs / WSL2's 9P, and any host-side touch of the file
+# will pseudo-lock the DB inside the container.
+
+services:
+  enphase-agent:
+    build: .
+    image: enphase-agent:local
+    container_name: enphase-agent
+    env_file: .env
+    environment:
+      TZ: America/Los_Angeles
+      ENPHASE_DB_PATH: /data/enphase.db
+    volumes:
+      - enphase_data:/data
+
+volumes:
+  enphase_data:
