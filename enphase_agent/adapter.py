@@ -15,12 +15,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import pybreaker
 from pyenphase import Envoy
 from pyenphase.exceptions import EnvoyAuthenticationError
-
-# TODO(verify): EnvoyStorageMode import path and member names against the
-# pyenphase release pinned in pyproject (pyenphase.models.tariff as of 1.x).
 from pyenphase.models.tariff import EnvoyStorageMode
 
 from .errors import AuthError, CircuitOpen, StaleStateError
@@ -45,6 +41,49 @@ _MODE_FROM_ENPHASE: dict[EnvoyStorageMode, BatteryMode] = {
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class _AsyncCircuitBreaker:
+    """Minimal asyncio-native circuit breaker. Three states: closed passes
+    calls through; N consecutive failures open it for reset_timeout seconds;
+    the first call after that is a probe (half-open) — success closes, any
+    failure reopens. Excluded exception types don't count as failures — a 401
+    is a trust-boundary problem, not an availability signal."""
+
+    def __init__(
+        self,
+        fail_max: int,
+        reset_timeout: float,
+        exclude: tuple[type[BaseException], ...] = (),
+    ) -> None:
+        self._fail_max = fail_max
+        self._reset_timeout = reset_timeout
+        self._exclude = exclude
+        self._failures = 0
+        self._opened_at: float | None = None
+        self._lock = asyncio.Lock()
+
+    async def call_async(self, fn: Callable[..., Awaitable[Any]], *args: Any) -> Any:
+        async with self._lock:
+            if self._opened_at is not None:
+                if time.monotonic() - self._opened_at < self._reset_timeout:
+                    raise CircuitOpen("breaker is open")
+                # half-open probe
+                self._opened_at = None
+        try:
+            result = await fn(*args)
+        except self._exclude:
+            raise
+        except Exception:
+            async with self._lock:
+                self._failures += 1
+                if self._failures >= self._fail_max:
+                    self._opened_at = time.monotonic()
+            raise
+        else:
+            async with self._lock:
+                self._failures = 0
+            return result
 
 
 class _TokenBucket:
@@ -81,31 +120,31 @@ class EnphaseAdapter:
         now_fn: Callable[[], datetime] = _utcnow,
         min_call_interval: float = MIN_CALL_INTERVAL_S,
     ) -> None:
+        self._host = host
         self._email = email
         self._password = password
-        # pyenphase discovers the serial during setup(); kept because the
-        # entrez token request is scoped per-serial.
-        # TODO(verify): whether Envoy.authenticate needs the serial passed
-        # explicitly or reads it from setup() discovery.
+        # pyenphase discovers the serial during setup(); kept in case a future
+        # entrez path wants it explicitly.
         self._serial = serial
-        self._envoy: Envoy = envoy if envoy is not None else Envoy(host)
+        # Envoy() builds an aiohttp connector that requires a running event loop,
+        # so we lazy-construct in _ensure_auth. Tests inject a fake via `envoy=`.
+        self._envoy: Envoy | None = envoy
         self._now = now_fn
         self._authenticated = False
         self._cache: SystemState | None = None
         self._limiter = _TokenBucket(min_call_interval)
-        # Auth failures are excluded from the breaker: a 401 is a trust-boundary
-        # problem, not an availability signal — it must fail fast, not trip us open.
-        self._breaker = pybreaker.CircuitBreaker(
+        self._breaker = _AsyncCircuitBreaker(
             fail_max=BREAKER_FAIL_MAX,
             reset_timeout=BREAKER_RESET_TIMEOUT_S,
-            exclude=[EnvoyAuthenticationError],
+            exclude=(EnvoyAuthenticationError,),
         )
 
     async def get_state(self) -> SystemState:
         """Fresh read when the gateway answers; graceful degradation to the
         cached snapshot (stale-flagged past STALE_AFTER) when it doesn't."""
         try:
-            await self._call(self._envoy.update)
+            envoy = await self._ready_envoy()
+            await self._call(envoy.update)
         except AuthError:
             raise
         except CircuitOpen:
@@ -118,6 +157,7 @@ class EnphaseAdapter:
             if cached is None:
                 raise
             return cached
+        assert self._envoy is not None
         state = self._to_state(self._envoy.data)
         self._cache = state
         return state
@@ -131,28 +171,44 @@ class EnphaseAdapter:
         logger.info(
             "set_battery_mode %s -> %s: %s", state.battery_mode.name, mode.name, reason
         )
-        # TODO(verify): Envoy.set_storage_mode is what the HA integration uses
-        # for mode writes — confirm name/signature on the pinned release.
-        await self._call(self._envoy.set_storage_mode, _MODE_TO_ENPHASE[mode])
+        envoy = await self._ready_envoy()
+        await self._call(envoy.set_storage_mode, _MODE_TO_ENPHASE[mode])
 
     async def set_reserve_soc(self, pct: float, reason: str) -> None:
         """Fraction in, integer percent out — the unit translation stays in the ACL."""
         await self._require_fresh_state()
         logger.info("set_reserve_soc -> %.0f%%: %s", pct * 100, reason)
-        # TODO(verify): Envoy.set_reserve_soc name/signature (integer percent?).
-        await self._call(self._envoy.set_reserve_soc, round(pct * 100))
+        envoy = await self._ready_envoy()
+        await self._call(envoy.set_reserve_soc, round(pct * 100))
+
+    async def close(self) -> None:
+        """Release the underlying aiohttp session. Safe to call on a never-used
+        adapter (envoy stays None if _ensure_auth was never reached)."""
+        if self._envoy is not None:
+            await self._envoy.close()
+            self._envoy = None
+            self._authenticated = False
+
+    async def __aenter__(self) -> EnphaseAdapter:
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        await self.close()
+
+    async def _ready_envoy(self) -> Envoy:
+        """Lazy-construct + authenticate before returning the client. Ensures
+        every write/read path shares one initialization pattern."""
+        await self._ensure_auth()
+        assert self._envoy is not None
+        return self._envoy
 
     async def enable_storm_guard(self, enabled: bool, reason: str) -> None:
-        """Idempotent for the same reason mode writes are."""
-        state = await self._require_fresh_state()
-        if state.storm_guard == enabled:
-            logger.info("enable_storm_guard no-op (already %s): %s", enabled, reason)
-            return
-        logger.info("enable_storm_guard -> %s: %s", enabled, reason)
-        # TODO(verify): pyenphase may not expose storm guard writes at all; the
-        # method we want is Envoy.set_storm_guard(enabled: bool). If absent,
-        # this is the one place we'd add a raw /service/... cloud call.
-        await self._call(self._envoy.set_storm_guard, enabled)
+        """Not exposed by pyenphase 4.0.1 — storm guard is an Enlighten cloud
+        feature (Envoy.request('/service/...')) that we'll wire in a follow-up.
+        Failing loud beats a silent AttributeError deep inside a control loop."""
+        raise NotImplementedError(
+            "storm_guard writes require a raw Enlighten cloud call — not yet wired"
+        )
 
     async def _require_fresh_state(self) -> SystemState:
         """Stale reads are tolerated; stale writes are not — acting on a 10-min-old
@@ -169,8 +225,6 @@ class EnphaseAdapter:
         await self._ensure_auth()
         try:
             return await self._breaker.call_async(fn, *args)
-        except pybreaker.CircuitBreakerError as exc:
-            raise CircuitOpen(str(exc)) from exc
         except EnvoyAuthenticationError as exc:
             # Token expired mid-session: force a re-auth on the next call.
             self._authenticated = False
@@ -179,13 +233,12 @@ class EnphaseAdapter:
     async def _ensure_auth(self) -> None:
         """Fail-fast at the trust boundary: bad credentials surface on the first
         call, not deep inside a control loop hours later."""
+        if self._envoy is None:
+            self._envoy = Envoy(self._host)
         if self._authenticated:
             return
         try:
             await self._envoy.setup()
-            # TODO(verify): authenticate() kwarg names (username/password) and
-            # whether a cached entrez JWT can be passed via token=... to skip
-            # the Enlighten login round-trip.
             await self._envoy.authenticate(username=self._email, password=self._password)
         except EnvoyAuthenticationError as exc:
             raise AuthError(f"Enlighten rejected credentials for {self._email}") from exc
@@ -199,10 +252,6 @@ class EnphaseAdapter:
 
     def _to_state(self, data: Any) -> SystemState:
         """The one translation point from Enphase's shapes to ours."""
-        # TODO(verify): attribute names against pyenphase's EnvoyData — based on
-        # the shapes the Home Assistant enphase_envoy integration consumes
-        # (system_production/system_consumption watts_now, encharge_aggregate
-        # state_of_charge, tariff.storage_settings mode/reserved_soc).
         storage = data.tariff.storage_settings
         return SystemState(
             production_w=float(data.system_production.watts_now),
@@ -210,8 +259,8 @@ class EnphaseAdapter:
             battery_soc=float(data.encharge_aggregate.state_of_charge) / 100.0,
             battery_mode=_MODE_FROM_ENPHASE[storage.mode],
             reserve_soc=float(storage.reserved_soc) / 100.0,
-            # TODO(verify): storm guard read location; getattr fallback keeps a
-            # missing attribute from looking like an outage.
+            # pyenphase 4.0.1 doesn't surface storm guard; getattr fallback
+            # reports off rather than crashing when the attr is absent.
             storm_guard=bool(getattr(storage, "storm_guard", False)),
             ts=self._now(),
             stale=False,

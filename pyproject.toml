@@ -7,11 +7,11 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Danh Le" }]
 dependencies = [
-    "pyenphase>=1.20",
-    "pybreaker>=1.2",
+    "pyenphase>=4.0",
     "typer>=0.12",
     "rich>=13.0",
     "httpx>=0.27",
+    "python-dotenv>=1.0",
 ]
 
 [project.scripts]

@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Awaitable, Callable
 from enum import Enum
 from typing import Any
 
 import typer
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
+
+load_dotenv()
 
 from .adapter import EnphaseAdapter
 from .errors import EnphaseAgentError
@@ -54,9 +58,14 @@ def _adapter() -> EnphaseAdapter:
     )
 
 
-def _run(coro: Any) -> Any:
+async def _with_adapter(work: Callable[[EnphaseAdapter], Awaitable[Any]]) -> Any:
+    async with _adapter() as adapter:
+        return await work(adapter)
+
+
+def _run(work: Callable[[EnphaseAdapter], Awaitable[Any]]) -> Any:
     try:
-        return asyncio.run(coro)
+        return asyncio.run(_with_adapter(work))
     except EnphaseAgentError as exc:
         console.print(f"[red]{type(exc).__name__}: {exc}[/red]")
         raise typer.Exit(1) from exc
@@ -65,7 +74,7 @@ def _run(coro: Any) -> Any:
 @app.command()
 def status() -> None:
     """Print the current system state."""
-    state: SystemState = _run(_adapter().get_state())
+    state: SystemState = _run(lambda a: a.get_state())
     table = Table(title="Enphase system state")
     table.add_column("Field")
     table.add_column("Value", justify="right")
@@ -89,10 +98,9 @@ def set_mode(
     ),
 ) -> None:
     """Change battery mode through the policy guardrails."""
-    # The mode-change bulkhead is in-memory, so one CLI invocation = one
-    # counter; it protects long-lived callers today. SQLite is the next PR.
-    policy = BatteryPolicy(_adapter())
-    _run(policy.set_battery_mode(_MODE_ARG_MAP[mode], reason=reason, confirm=confirm))
+    _run(lambda a: BatteryPolicy(a).set_battery_mode(
+        _MODE_ARG_MAP[mode], reason=reason, confirm=confirm
+    ))
     console.print(f"[green]Mode set to {mode.value}[/green]")
 
 
@@ -102,8 +110,7 @@ def set_reserve(
     reason: str = typer.Option("cli", help="Audit-trail reason recorded with the write."),
 ) -> None:
     """Set the battery reserve SoC through the policy guardrails."""
-    policy = BatteryPolicy(_adapter())
-    _run(policy.set_reserve_soc(pct, reason=reason))
+    _run(lambda a: BatteryPolicy(a).set_reserve_soc(pct, reason=reason))
     console.print(f"[green]Reserve set to {pct:.0%}[/green]")
 
 
