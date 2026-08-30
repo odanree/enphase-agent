@@ -44,7 +44,20 @@ services:
     # Prometheus's own TSDB below). A read-only YAML has no locks to lose.
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules.yml:/etc/prometheus/rules.yml:ro
       - prometheus_data:/prometheus
+    # Hot-storage-only long retention: 1y of raw 15s samples, no
+    # downsampling. At this cardinality (~40 series) that's roughly 1 GB/yr
+    # — trivial for a home tool. If cardinality ever explodes, this is where
+    # a Thanos/Mimir sidecar would take over with downsampled cold storage.
+    # --web.enable-lifecycle turns on POST /-/reload so recording-rule
+    # iterations don't need a container restart.
+    command:
+      [
+        "--config.file=/etc/prometheus/prometheus.yml",
+        "--storage.tsdb.retention.time=1y",
+        "--web.enable-lifecycle",
+      ]
     ports:
       # Exposed so you can poke PromQL at http://<host>:9090 while learning.
       - "9090:9090"

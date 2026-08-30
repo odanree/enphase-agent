@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from prometheus_client import CollectorRegistry
+from prometheus_client import CollectorRegistry, generate_latest
 
 from enphase_agent.daemon import scrape_once
 from enphase_agent.errors import AuthError, CircuitOpen, StaleStateError
@@ -140,6 +140,73 @@ async def test_mode_change_moves_the_one(metrics: Metrics) -> None:
 
     assert sample(metrics, "enphase_battery_mode", {"mode": "savings"}) == 0.0
     assert sample(metrics, "enphase_battery_mode", {"mode": "full_backup"}) == 1.0
+
+
+async def test_energy_gauges_publish_when_state_has_values(metrics: Metrics) -> None:
+    state = make_state(
+        production_wh_today=12_000,
+        production_wh_7d=90_000,
+        production_wh_lifetime=5_000_000,
+        consumption_wh_today=9_000,
+        consumption_wh_7d=70_000,
+        consumption_wh_lifetime=4_200_000,
+        battery_energy_available_wh=5_500,
+        battery_energy_capacity_wh=10_080,
+    )
+    await scrape_once(FakeAdapter(state=state), metrics)  # type: ignore[arg-type]
+
+    assert sample(metrics, "enphase_energy_produced_today_watt_hours") == 12_000.0
+    assert sample(metrics, "enphase_energy_produced_7d_watt_hours") == 90_000.0
+    assert sample(metrics, "enphase_energy_produced_lifetime_watt_hours") == 5_000_000.0
+    assert sample(metrics, "enphase_energy_consumed_today_watt_hours") == 9_000.0
+    assert sample(metrics, "enphase_energy_consumed_7d_watt_hours") == 70_000.0
+    assert sample(metrics, "enphase_energy_consumed_lifetime_watt_hours") == 4_200_000.0
+    assert sample(metrics, "enphase_battery_energy_available_watt_hours") == 5_500.0
+    assert sample(metrics, "enphase_battery_energy_capacity_watt_hours") == 10_080.0
+
+
+async def test_none_fields_are_absent_not_zero(metrics: Metrics) -> None:
+    # make_state leaves every optional field at None — a gateway without CT
+    # meters. The series must be ABSENT from exposition, not a phantom 0.
+    await scrape_once(FakeAdapter(state=make_state()), metrics)  # type: ignore[arg-type]
+
+    exposition = generate_latest(metrics.registry).decode()
+    for name in (
+        "enphase_energy_produced_today_watt_hours",
+        "enphase_energy_consumed_today_watt_hours",
+        "enphase_energy_produced_lifetime_watt_hours",
+        "enphase_battery_energy_available_watt_hours",
+        "enphase_grid_import_watts",
+        "enphase_grid_export_watts",
+    ):
+        assert sample(metrics, name) is None
+        assert f"\n{name} " not in exposition
+
+
+async def test_intermittent_none_keeps_last_value(metrics: Metrics) -> None:
+    # Graceful degradation: an upstream field that vanishes for one scrape
+    # keeps the last-known value (freshness is state_age's job), and never
+    # snaps to zero.
+    await scrape_once(FakeAdapter(state=make_state(production_wh_today=12_000)), metrics)  # type: ignore[arg-type]
+    await scrape_once(FakeAdapter(state=make_state(production_wh_today=None)), metrics)  # type: ignore[arg-type]
+
+    assert sample(metrics, "enphase_energy_produced_today_watt_hours") == 12_000.0
+
+
+async def test_grid_split_gauges_import_side(metrics: Metrics) -> None:
+    state = make_state(grid_import_watts=650.0, grid_export_watts=0.0)
+    await scrape_once(FakeAdapter(state=state), metrics)  # type: ignore[arg-type]
+
+    assert sample(metrics, "enphase_grid_import_watts") == 650.0
+    assert sample(metrics, "enphase_grid_export_watts") == 0.0
+
+
+async def test_grid_split_gauges_export_side(metrics: Metrics) -> None:
+    state = make_state(grid_import_watts=0.0, grid_export_watts=1200.0)
+    await scrape_once(FakeAdapter(state=state), metrics)  # type: ignore[arg-type]
+
+    assert sample(metrics, "enphase_grid_import_watts") == 0.0
+    assert sample(metrics, "enphase_grid_export_watts") == 1200.0
 
 
 async def test_state_age_reflects_clock_gap(metrics: Metrics) -> None:

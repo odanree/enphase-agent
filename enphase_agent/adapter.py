@@ -43,6 +43,18 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _opt_int(obj: Any, attr: str) -> int | None:
+    """None-tolerant read for pyenphase's optional fields — an absent object
+    or attribute becomes an absent SystemState field, never a crash."""
+    value = getattr(obj, attr, None) if obj is not None else None
+    return None if value is None else int(value)
+
+
+def _opt_float(obj: Any, attr: str) -> float | None:
+    value = getattr(obj, attr, None) if obj is not None else None
+    return None if value is None else float(value)
+
+
 class _AsyncCircuitBreaker:
     """Minimal asyncio-native circuit breaker. Three states: closed passes
     calls through; N consecutive failures open it for reset_timeout seconds;
@@ -268,8 +280,20 @@ class EnphaseAdapter:
     def _to_state(self, data: Any) -> SystemState:
         """The one translation point from Enphase's shapes to ours."""
         storage = data.tariff.storage_settings
+        production = data.system_production
+        # These three are `| None` on EnvoyData (CT-metered gateways only),
+        # so every read below goes through the None-tolerant helpers — an
+        # absent meter must degrade to absent fields, not crash the daemon.
+        consumption = getattr(data, "system_consumption", None)
+        net = getattr(data, "system_net_consumption", None)
+        encharge = getattr(data, "encharge_aggregate", None)
+        # pyenphase docs net consumption as "grid import/export"; Enphase's
+        # net-consumption CT reports positive = importing from grid.
+        # TODO(verify): confirm the sign on live hardware — the pyenphase
+        # docstring names the concept but not the sign convention.
+        net_w = _opt_float(net, "watts_now")
         return SystemState(
-            production_w=float(data.system_production.watts_now),
+            production_w=float(production.watts_now),
             consumption_w=float(data.system_consumption.watts_now),
             battery_soc=float(data.encharge_aggregate.state_of_charge) / 100.0,
             battery_mode=_MODE_FROM_ENPHASE[storage.mode],
@@ -279,4 +303,14 @@ class EnphaseAdapter:
             storm_guard=bool(getattr(storage, "storm_guard", False)),
             ts=self._now(),
             stale=False,
+            production_wh_today=_opt_int(production, "watt_hours_today"),
+            production_wh_7d=_opt_int(production, "watt_hours_last_7_days"),
+            production_wh_lifetime=_opt_int(production, "watt_hours_lifetime"),
+            consumption_wh_today=_opt_int(consumption, "watt_hours_today"),
+            consumption_wh_7d=_opt_int(consumption, "watt_hours_last_7_days"),
+            consumption_wh_lifetime=_opt_int(consumption, "watt_hours_lifetime"),
+            battery_energy_available_wh=_opt_int(encharge, "available_energy"),
+            battery_energy_capacity_wh=_opt_int(encharge, "max_available_capacity"),
+            grid_import_watts=None if net_w is None else max(net_w, 0.0),
+            grid_export_watts=None if net_w is None else max(-net_w, 0.0),
         )

@@ -1,0 +1,51 @@
+# Recording rules — materialized views for the observability stack.
+#
+# Naming convention: `namespace:metric_name:aggregation_unit`. The colons are
+# the standard Prometheus tell that a series is DERIVED (precomputed by a
+# rule), not a raw scrape — raw metric names never contain `:`.
+#
+# Each rule trades a little storage for query latency: the expensive
+# subquery runs once a minute in the background instead of on every
+# dashboard refresh. Add a rule whenever a panel's query cost exceeds its
+# refresh interval. Reload without a restart:
+#   curl -X POST http://localhost:9090/-/reload
+groups:
+  - name: enphase_derived
+    interval: 1m
+    rules:
+      # Materialized view: fraction of the last 24h of consumption NOT
+      # imported from the grid — i.e. covered by solar (directly or via the
+      # solar-charged battery). Computed from energy sums, not instant
+      # ratios, so big-load hours weigh more than idle hours.
+      #
+      # NOTE: not min(production, consumption) — clamp_max only accepts a
+      # scalar bound, and the element-wise-min idiom ((a<b) or b) is fragile
+      # under label matching. 1 - import/consumption is equivalent for
+      # coverage and reads cleaner. clamp() absorbs CT jitter at the edges.
+      - record: enphase:solar_coverage_24h:ratio
+        expr: >
+          clamp(
+            1 - (
+              sum_over_time(enphase_grid_import_watts[24h:15s])
+              /
+              sum_over_time(enphase_consumption_watts[24h:15s])
+            ),
+          0, 1)
+
+      # Info-gauge integrated over time: enphase_battery_mode{mode=...} is 1
+      # while that mode is active, 0 otherwise. Summing the 15s-step subquery
+      # samples and multiplying by the step width is a Riemann sum — seconds
+      # spent in each mode over the last 24h, one series per mode label.
+      - record: enphase:time_in_mode_24h:seconds
+        expr: >
+          sum_over_time(enphase_battery_mode[24h:15s]) * 15
+
+      # Peak/valley SoC over 24h. Plain range selectors (no subquery): the
+      # raw samples are already there, and max/min don't care about spacing.
+      - record: enphase:soc_peak_24h:ratio
+        expr: >
+          max_over_time(enphase_battery_soc_ratio[24h])
+
+      - record: enphase:soc_valley_24h:ratio
+        expr: >
+          min_over_time(enphase_battery_soc_ratio[24h])

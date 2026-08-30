@@ -74,13 +74,56 @@ async def test_get_state_with_no_cache_propagates_failure(adapter, envoy):
         await adapter.get_state()
 
 
+async def test_energy_accumulators_mapped(adapter):
+    state = await adapter.get_state()
+    assert state.production_wh_today == 12_000
+    assert state.production_wh_7d == 90_000
+    assert state.production_wh_lifetime == 5_000_000
+    assert state.consumption_wh_today == 9_000
+    assert state.consumption_wh_7d == 70_000
+    assert state.consumption_wh_lifetime == 4_200_000
+    assert state.battery_energy_available_wh == 5_500
+    assert state.battery_energy_capacity_wh == 10_080
+
+
+async def test_positive_net_consumption_is_grid_import(adapter, envoy, data_factory):
+    envoy.data = data_factory(net_consumption_w=300)
+    state = await adapter.get_state()
+    # Directional-split invariant: at most one side nonzero.
+    assert state.grid_import_watts == 300.0
+    assert state.grid_export_watts == 0.0
+
+
+async def test_negative_net_consumption_is_grid_export(adapter, envoy, data_factory):
+    envoy.data = data_factory(net_consumption_w=-1200)
+    state = await adapter.get_state()
+    assert state.grid_import_watts == 0.0
+    assert state.grid_export_watts == 1200.0
+
+
+async def test_absent_optional_sources_map_to_none(adapter, envoy):
+    # A non-CT gateway: pyenphase leaves these EnvoyData attrs as None.
+    envoy.data.system_net_consumption = None
+    envoy.data.system_consumption.watt_hours_today = None
+    del envoy.data.encharge_aggregate.available_energy
+    state = await adapter.get_state()
+    assert state.grid_import_watts is None
+    assert state.grid_export_watts is None
+    assert state.consumption_wh_today is None
+    assert state.battery_energy_available_wh is None
+    # The rest of the snapshot still populates — degrade, don't crash.
+    assert state.production_wh_today == 12_000
+
+
 async def test_reserve_written_as_integer_percent(adapter, envoy):
     await adapter.set_reserve_soc(0.35, reason="test")
     assert ("set_reserve_soc", 35) in envoy.calls
 
 
-async def test_storm_guard_idempotent(adapter, envoy):
-    await adapter.enable_storm_guard(False, reason="test")  # already off
+async def test_storm_guard_raises_not_implemented(adapter, envoy):
+    # pyenphase 4.0.1 has no storm-guard write; the method fails loud rather
+    # than silently AttributeError'ing inside a control loop later.
+    import pytest
+    with pytest.raises(NotImplementedError):
+        await adapter.enable_storm_guard(True, reason="test")
     assert not [c for c in envoy.calls if c[0] == "set_storm_guard"]
-    await adapter.enable_storm_guard(True, reason="test")
-    assert ("set_storm_guard", True) in envoy.calls

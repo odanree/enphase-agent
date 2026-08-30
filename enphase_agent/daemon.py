@@ -54,6 +54,7 @@ def _publish_state(state: SystemState, metrics: Metrics, now: datetime) -> None:
     metrics.battery_reserve_ratio.set(state.reserve_soc)
     metrics.storm_guard_active.set(1.0 if state.storm_guard else 0.0)
     metrics.set_battery_mode(state.battery_mode)
+    metrics.publish_optional_state(state)
     # Age comes from the state's own timestamp, not "did the call return" —
     # a cache-served stale read still moves this gauge, which is the point
     # of the freshness SLI.

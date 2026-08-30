@@ -18,12 +18,33 @@ def make_envoy_data(
     soc_pct: int = 55,
     reserve_pct: int = 20,
     storm_guard: bool = False,
+    net_consumption_w: int = 300,
 ) -> SimpleNamespace:
-    """Mirror of the pyenphase EnvoyData attributes the adapter reads."""
+    """Mirror of the pyenphase EnvoyData attributes the adapter reads.
+
+    Energy accumulators mirror EnvoySystemProduction/EnvoySystemConsumption
+    (watt_hours_today / _last_7_days / _lifetime + watts_now); net consumption
+    shares the consumption shape, positive watts_now = importing from grid.
+    """
     return SimpleNamespace(
-        system_production=SimpleNamespace(watts_now=1500),
-        system_consumption=SimpleNamespace(watts_now=800),
-        encharge_aggregate=SimpleNamespace(state_of_charge=soc_pct),
+        system_production=SimpleNamespace(
+            watts_now=1500,
+            watt_hours_today=12_000,
+            watt_hours_last_7_days=90_000,
+            watt_hours_lifetime=5_000_000,
+        ),
+        system_consumption=SimpleNamespace(
+            watts_now=800,
+            watt_hours_today=9_000,
+            watt_hours_last_7_days=70_000,
+            watt_hours_lifetime=4_200_000,
+        ),
+        system_net_consumption=SimpleNamespace(watts_now=net_consumption_w),
+        encharge_aggregate=SimpleNamespace(
+            state_of_charge=soc_pct,
+            available_energy=5_500,
+            max_available_capacity=10_080,
+        ),
         tariff=SimpleNamespace(
             storage_settings=SimpleNamespace(
                 mode=_MODE_TO_ENPHASE[mode],

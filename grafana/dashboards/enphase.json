@@ -5,19 +5,172 @@
   "timezone": "browser",
   "editable": true,
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": { "from": "now-6h", "to": "now" },
   "annotations": { "list": [] },
   "templating": { "list": [] },
   "panels": [
     {
+      "id": 4,
+      "type": "stat",
+      "title": "Produced today",
+      "description": "enphase_energy_produced_today_watt_hours / 1000 — the gateway's own since-midnight accumulator, divided by 1000 to display kWh (unit conversion belongs in the query layer, not the exporter). The metric resets to 0 at local midnight, which is exactly why it's a Gauge and not a Counter. Surprising: 0 or 'No data' mid-morning means the array, the CT metering, or the daemon is out — cross-check the Health SLI panel before blaming the panels on the roof.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "kwatth",
+          "decimals": 1,
+          "color": { "mode": "fixed", "fixedColor": "green" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "enphase_energy_produced_today_watt_hours / 1000",
+          "legendFormat": "Produced",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Consumed today",
+      "description": "enphase_energy_consumed_today_watt_hours / 1000 — the gateway's since-midnight consumption accumulator in kWh (CT-metered gateways only; if this shows 'No data' the exporter deliberately publishes nothing rather than a fake zero). Fallback if the accumulator ever disappears from pyenphase: sum_over_time(enphase_consumption_watts[24h:15s]) * 15 / 3600000 — a Riemann sum in PromQL, approximate because it integrates 15s power samples instead of reading the meter. Surprising: consumed today far above produced today on a sunny day means a heavy load ran off-solar — check the grid-import stat.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "kwatth",
+          "decimals": 1,
+          "color": { "mode": "fixed", "fixedColor": "orange" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "enphase_energy_consumed_today_watt_hours / 1000",
+          "legendFormat": "Consumed",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Solar coverage (24h)",
+      "description": "enphase:solar_coverage_24h:ratio * 100 — a recording rule (the colons are the tell that this series is derived, not scraped): 1 minus grid-import energy over consumption energy for the trailing 24h, precomputed every minute so this panel costs one sample lookup instead of a 24h subquery per refresh (materialized view for the observability stack). Reads as 'what fraction of the house's energy did NOT come from the grid'. Unhealthy: red under 30% on a sunny day means solar+battery barely offset the house — sizing problem, heavy new load, or the battery mode is fighting you.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "min": 0,
+          "max": 100,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 30 },
+              { "color": "green", "value": 60 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "enphase:solar_coverage_24h:ratio * 100",
+          "legendFormat": "Coverage",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Grid flow now",
+      "description": "enphase_grid_import_watts and enphase_grid_export_watts — the exporter splits the gateway's one signed net-consumption reading into two always-non-negative directional gauges (directional gauges over signed values: easier to stack, threshold, and rate() than a signed series). Positive on both sides is impossible by construction; whichever is nonzero tells you which way electrons are flowing right now. Surprising: importing during peak sun means a load spike or a battery refusing to discharge — check mode and SoC.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "decimals": 0,
+          "color": { "mode": "fixed", "fixedColor": "text" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Importing" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Exporting" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "enphase_grid_import_watts",
+          "legendFormat": "Importing",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "refId": "B",
+          "expr": "enphase_grid_export_watts",
+          "legendFormat": "Exporting",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ]
+    },
+    {
       "id": 1,
       "type": "timeseries",
       "title": "Solar vs Consumption",
       "description": "Two raw gauges plotted over time: enphase_production_watts (what the panels are making) and enphase_consumption_watts (what the house is using). No PromQL operators needed — gauges are instantaneous values, so plotting the raw series IS the query. Unhealthy: production flatlining at 0 during daylight (array or gateway problem), or either series going stale/gappy (daemon or Prometheus down — cross-check the Health SLI panel).",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 0 },
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 5 },
       "fieldConfig": {
         "defaults": {
           "unit": "watt",
@@ -57,7 +210,7 @@
       "title": "Battery SoC",
       "description": "enphase_battery_soc_ratio * 100 — the exporter publishes state of charge as a 0-1 ratio (Prometheus naming convention), and the `* 100` scalar multiplication converts it to percent for display. Unhealthy: red below 20% (approaching the backup floor — the battery can no longer ride out an outage), yellow below 40%.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 0 },
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 5 },
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
@@ -94,7 +247,7 @@
       "title": "Scrape freshness + error rate",
       "description": "The service-health (SLI) panel — this is where an SLO would hang, e.g. 'state age under 60s for 99% of 30 days'. Series 1: enphase_state_age_seconds, seconds since the last successful gateway read; with a 15s scrape loop it should hover near 15. Yellow past 30s, red past 60s means the daemon is being served stale cache (gateway down, breaker open). Series 2: rate(enphase_scrape_total{outcome=\"error\"}[5m]) — `rate()` converts the ever-increasing error counter into errors-per-second averaged over a sliding 5-minute window; healthy is a flat line at 0. Age climbing while error rate stays 0 means the daemon itself died (Prometheus will also mark the target down).",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 14 },
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -155,6 +308,42 @@
           "refId": "B",
           "expr": "rate(enphase_scrape_total{outcome=\"error\"}[5m])",
           "legendFormat": "Error rate (5m)",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "piechart",
+      "title": "Time in each mode (24h)",
+      "description": "enphase:time_in_mode_24h:seconds — a recording rule implementing the info-gauge-integrated-over-time pattern. The mode gauge enphase_battery_mode{mode=...} is 1 while a mode is active, 0 otherwise; sum_over_time at a 15s subquery step multiplied by 15 is a Riemann sum giving seconds spent in each mode over the last 24h, one slice per mode label. Surprising: any slice for full_backup you didn't ask for (something flipped the battery to backup — check the writes audit counter), or a mode split that doesn't match your schedule (rules engine and reality disagree).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 23 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "pieType": "pie",
+        "displayLabels": ["name", "percent"],
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true,
+          "values": []
+        },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "enphase:time_in_mode_24h:seconds",
+          "legendFormat": "{{mode}}",
           "datasource": { "type": "prometheus", "uid": "prometheus" }
         }
       ]

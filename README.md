@@ -81,6 +81,20 @@ One-shot CLI commands still work alongside the daemon: `docker compose run --rm 
 | `enphase_scrape_duration_seconds` | Histogram | `histogram_quantile(0.95, rate(enphase_scrape_duration_seconds_bucket[5m]))` | `get_state` latency (RED: **D**uration) |
 | `enphase_circuit_breaker_open` | Gauge | `enphase_circuit_breaker_open == 1` | 1 while the adapter's breaker is failing fast |
 | `enphase_writes_total{action,outcome}` | Counter | `sum by (outcome) (increase(enphase_writes_total[24h]))` | Battery write attempts through the policy layer — the audit trail |
+| `enphase_energy_produced_today_watt_hours` | Gauge | `enphase_energy_produced_today_watt_hours / 1000` | Solar energy since local midnight (gateway accumulator; resets daily — that reset is why it's a Gauge, not a Counter) |
+| `enphase_energy_produced_7d_watt_hours` | Gauge | `enphase_energy_produced_7d_watt_hours / 1000` | Solar energy over the previous 7 days, excluding today (rolling window) |
+| `enphase_energy_produced_lifetime_watt_hours` | Gauge | `rate(enphase_energy_produced_lifetime_watt_hours[1h])` | Lifetime solar energy. Monotonic at the source but exported as a Gauge — we mirror the value rather than own the increments, and `_total` on a Gauge would mislead; `rate()` works on it regardless |
+| `enphase_energy_consumed_today_watt_hours` | Gauge | `enphase_energy_consumed_today_watt_hours / 1000` | Household energy since local midnight (CT-metered gateways only) |
+| `enphase_energy_consumed_7d_watt_hours` | Gauge | `enphase_energy_consumed_7d_watt_hours / 1000` | Household energy over the previous 7 days, excluding today |
+| `enphase_energy_consumed_lifetime_watt_hours` | Gauge | `rate(enphase_energy_consumed_lifetime_watt_hours[1h])` | Lifetime household energy consumed |
+| `enphase_battery_energy_available_watt_hours` | Gauge | `enphase_battery_energy_available_watt_hours / 1000` | Usable energy in the battery right now |
+| `enphase_battery_energy_capacity_watt_hours` | Gauge | `enphase_battery_energy_available_watt_hours / enphase_battery_energy_capacity_watt_hours` | Battery nameplate capacity (divide available by it for a Wh-based SoC cross-check) |
+| `enphase_grid_import_watts` | Gauge | `enphase_grid_import_watts > 0` | Power drawn from the grid right now (always ≥ 0) |
+| `enphase_grid_export_watts` | Gauge | `enphase_grid_export_watts > 0` | Power pushed to the grid right now (always ≥ 0) |
+
+The grid pair is the **directional gauges over signed values** pattern: the gateway reports one signed net-consumption power, but signed metrics are hard to stack, hard to color-threshold, and confuse `rate()` downstream — so the exporter splits it into two always-non-negative gauges, at most one nonzero at a time.
+
+All of the energy/grid metrics come from optional gateway sources (CT metering, Encharge aggregate). When the source is absent the exporter publishes **nothing** — an absent series you can catch with `absent(...)` — rather than a fake `0` that would poison daily-total panels.
 
 ### Try these PromQL queries
 
@@ -89,6 +103,30 @@ Each maps to one dashboard panel — paste them into Prometheus at `:9090/graph`
 1. **`enphase_production_watts`** — no operator at all. Gauges are instantaneous values, so naming the metric *is* the query; Prometheus returns the latest sample per scrape and Grafana draws the line.
 2. **`enphase_battery_soc_ratio * 100`** — scalar arithmetic. The exporter follows the Prometheus convention of publishing ratios as 0–1 (`_ratio` suffix); the `* 100` multiplies every sample by 100 so the gauge panel can render percent. Unit conversions belong in the query layer, not the exporter.
 3. **`rate(enphase_scrape_total{outcome="error"}[5m])`** — the counter idiom. Counters only ever go up, so their absolute value is meaningless; `rate(...[5m])` computes the per-second increase averaged over a sliding 5-minute window, turning "total errors ever" into "errors per second right now". (`increase(...[1h])` is the same idea but reports the raw count over the window instead of a per-second rate.)
+4. **`enphase_energy_produced_today_watt_hours / 1000`** — the "Produced today" stat. The gateway already accumulates since-midnight energy, so the query is just a unit conversion to kWh; no `sum_over_time` gymnastics needed when the source does the integration for you.
+5. **`enphase:solar_coverage_24h:ratio * 100`** — the "Solar coverage" stat. Note the colons: this is a recording rule, not a raw metric. The rule computes `1 - (grid-import energy / consumption energy)` over the trailing 24h once a minute, so the panel reads one precomputed sample instead of running a 24h subquery per refresh.
+6. **`enphase_grid_import_watts` / `enphase_grid_export_watts`** — the "Grid flow now" stat. Two directional gauges split from one signed reading; whichever is nonzero tells you which way electrons are flowing.
+7. **`enphase:time_in_mode_24h:seconds`** — the mode pie. `sum_over_time(enphase_battery_mode[24h:15s]) * 15` integrates the one-hot mode gauge: each 15s sample where a mode was active contributes 15 seconds to its slice — an info-gauge integrated over time, i.e. a Riemann sum in PromQL.
+
+### Recording rules
+
+`prometheus/rules.yml` holds derived series — **materialized views for the observability stack**. A recording rule precomputes an expensive expression on a fixed cadence (ours run every 1m) and stores the result as a new series, so dashboards read one sample instead of re-running a 24h subquery on every refresh. Same tradeoff as a database materialized view: storage and refresh lag bought back as query latency.
+
+The naming convention is `namespace:metric_name:aggregation_unit` (e.g. `enphase:solar_coverage_24h:ratio`). Raw metric names never contain `:`, so the colons are the standard Prometheus tell that a series is derived, not scraped.
+
+When to add one: when a panel's query cost exceeds its refresh interval — a 24h subquery at 15s resolution re-evaluated every 30s by every open browser tab is the textbook case. Instant gauges (`enphase_production_watts`) never need one.
+
+Iterating on rules doesn't require a container restart — the compose file starts Prometheus with `--web.enable-lifecycle`, so after editing `rules.yml`:
+
+```sh
+curl -X POST http://localhost:9090/-/reload
+```
+
+### Retention
+
+Prometheus keeps **1 year** of raw 15s samples (`--storage.tsdb.retention.time=1y` in compose, up from the 15d default) — the **hot-storage-only long retention** pattern: no downsampling, every sample queryable at full resolution. The disk math makes it a non-decision at this scale: Prometheus averages ~1–2 bytes per sample post-compression, and this exporter emits ~40 series × 4 samples/min ≈ 84M samples/year — on the order of **1 GB/year**. Trivial for a home tool.
+
+The pattern stops scaling when cardinality does. If this stack ever grew to thousands of series (per-inverter metrics, per-circuit CTs), the graduation path is **downsampled cold storage**: a Thanos or Mimir sidecar (or Grafana Cloud) that keeps recent data raw and rolls older data up to 5m/1h resolution. The recording rules above are the miniature, manual version of the same idea — precompute the aggregates you'll actually query.
 
 ### Patterns in play
 
