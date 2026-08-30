@@ -99,12 +99,14 @@
         "defaults": {
           "unit": "s",
           "min": 0,
+          "max": 90,
           "custom": {
             "drawStyle": "line",
             "lineWidth": 2,
             "fillOpacity": 0,
             "showPoints": "never",
             "spanNulls": false,
+            "axisPlacement": "left",
             "thresholdsStyle": { "mode": "dashed" }
           },
           "thresholds": {
@@ -114,14 +116,26 @@
               { "color": "yellow", "value": 30 },
               { "color": "red", "value": 60 }
             ]
-          }
+          },
+          "color": { "mode": "fixed", "fixedColor": "green" }
         },
         "overrides": [
           {
             "matcher": { "id": "byName", "options": "Error rate (5m)" },
             "properties": [
-              { "id": "unit", "value": "ops" },
-              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }
+              { "id": "unit", "value": "reqps" },
+              { "id": "min", "value": 0 },
+              { "id": "max", "value": 1 },
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } },
+              { "id": "custom.axisPlacement", "value": "right" },
+              { "id": "custom.axisLabel", "value": "errors / sec" },
+              { "id": "custom.thresholdsStyle", "value": { "mode": "off" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "State age (s)" },
+            "properties": [
+              { "id": "custom.axisLabel", "value": "state age (s)" }
             ]
           }
         ]
