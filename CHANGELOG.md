@@ -2,6 +2,8 @@
 
 ## [0.1.0] - unreleased
 
+- Grafana annotations from the SQLite ledger: **mode changes** (green, `set_mode` + `success`) and **write failures** (red, `rejected` / `error`) rendered as dots on the time-series panels, tooltip carrying target / reason / error class — the first real consumer of the ledger schema. Datasource `EnphaseLedger` (`frser-sqlite-datasource`, installed via `GF_INSTALL_PLUGINS`) is read-only at three layers: `:ro` volume mount, the plugin's default `PRAGMA query_only=1`, and provisioning `editable: false` (least-privilege datasource). The `enphase_data` named volume is now attached to both `enphase-agent` (writer) and `grafana` (reader) — shared-volume single-writer-many-readers over WAL, no bind mount. Dashboard version 4, same UID.
+
 - SQLite audit ledger (`ledger.py`, `aiosqlite`):
   - One `writes` table at `ENPHASE_DB_PATH` (`/data/enphase.db` on the named volume), WAL mode — concurrent-reader-single-writer safe across the CLI/daemon process boundary. `CREATE IF NOT EXISTS` only; no migration framework until a second schema shape exists.
   - `BatteryPolicy`'s per-day mode-change bulkhead now persists across process boundaries and container restarts (previously an in-memory list that reset on every CLI invocation). The bulkhead check fails closed on a ledger read error; the audit record fails open (logged) so an audit hiccup can't turn a completed battery write into a retried one.

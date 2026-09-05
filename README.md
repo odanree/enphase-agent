@@ -131,6 +131,23 @@ Prometheus keeps **1 year** of raw 15s samples (`--storage.tsdb.retention.time=1
 
 The pattern stops scaling when cardinality does. If this stack ever grew to thousands of series (per-inverter metrics, per-circuit CTs), the graduation path is **downsampled cold storage**: a Thanos or Mimir sidecar (or Grafana Cloud) that keeps recent data raw and rolls older data up to 5m/1h resolution. The recording rules above are the miniature, manual version of the same idea — precompute the aggregates you'll actually query.
 
+### Ledger annotations on the dashboard
+
+The audit ledger (below) is wired into Grafana as a second datasource, `EnphaseLedger`, via the `frser-sqlite-datasource` plugin, and the dashboard carries two annotation queries against it:
+
+| Annotation | Colour | Rows | Tooltip |
+|---|---|---|---|
+| **Mode changes** | green | `action='set_mode' AND outcome='success'` | title = new mode, text = `--reason` |
+| **Write failures** | red | `outcome IN ('rejected', 'error')` | title = `action outcome`, text = reason + `[error_class]` |
+
+Each matching row becomes a dot on the time axis, so cause-and-effect is visible at a glance: a green dot on **Solar vs Consumption** at the moment the agent flipped to `savings`, followed by the consumption line shifting from grid to battery. A run of red dots is what "the planner tried three times and got policy-rejected" looks like. `noop` rows are deliberately left off — they're audit-trail-only and would clutter the chart. The queries pass the ledger's RFC3339 `ts` straight through as the annotation time (the plugin parses it natively; a numeric column would be read as unix **seconds**) and format Grafana's `$__from` / `$__to` millisecond macros into the same `YYYY-MM-DDTHH:MM:SS.SSSZ` shape so the range filter is a plain lexicographic compare on the indexed column.
+
+Annotations only render on time-series-style panels — **Solar vs Consumption** and **Scrape freshness + error rate**. Stat, gauge, and pie panels have no time axis to put a dot on, so nothing appears there; that's Grafana's expected behaviour, not a missing wire.
+
+**Least-privilege datasource.** Grafana is granted one file and can only ever read it, enforced at three independent layers: the `enphase_data` volume is attached to the Grafana container with `:ro`; the plugin opens SQLite with `PRAGMA query_only=1` by default; and the provisioned datasource is `editable: false`, so no one clicking around in Grafana can point it at a writable path. Any single layer failing still leaves two. This is the same read/write path separation the whole stack is built on — a compromised dashboard can now read *why* the battery changed mode, but still cannot change it.
+
+**Shared-volume single-writer-many-readers via named volume.** The daemon and the CLI write to `/data/enphase.db`; Grafana reads the very same file at `/enphase-ledger/enphase.db` — one named volume, two mount points, no copy and no export. SQLite's WAL mode is what makes that safe: readers see the last committed snapshot and never block the writer, and the daemon's long-lived connection keeps the `-wal` / `-shm` files present for the read-only reader to attach to. Both containers stay inside Docker's storage layer, so the fcntl lock-forwarding bug that rules out host bind mounts never comes into play.
+
 ### Patterns in play
 
 Service metrics follow the **RED method** — Rate (`enphase_scrape_total`), Errors (`enphase_scrape_errors_total`, subclassed by kind), Duration (`enphase_scrape_duration_seconds`) — which answers "is the agent healthy" independently of the **domain gauges** (production, SoC, mode), which answer "is the house healthy". Everything is **pull-based**: the daemon exposes `/metrics` and Prometheus scrapes it, so a dead monitoring stack costs the agent nothing and a dead agent shows up as a down target. **Cardinality discipline**: every label value comes from a closed vocabulary enforced in `metrics.py` — no free-form strings, because one timestamp-in-a-label mistake mints a new time series per scrape. And the stack is **read/write path separated**: Grafana and Prometheus can only ever read — battery writes still flow exclusively through CLI → policy → adapter, so a compromised dashboard can observe your battery but can never drain your reserve.

@@ -72,10 +72,23 @@ services:
       # Default is admin/change_me from .env — change it before this ever
       # leaves the LAN (Grafana auth is the only gate on port 3000).
       GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-change_me}
+      # Installs on first boot, cached in grafana_data afterwards; idempotent
+      # on restart. This plugin opens SQLite with PRAGMA query_only=1 by
+      # default, which is one of the three read-only layers below.
+      GF_INSTALL_PLUGINS: frser-sqlite-datasource
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      # Shared-volume single-writer-many-readers via named volume: the same
+      # enphase_data volume the daemon writes is attached here read-only, so
+      # Grafana joins as one more WAL reader without ever touching -wal/-shm
+      # as a writer. Read-only is enforced at three layers — this :ro flag,
+      # the plugin's query_only pragma, and editable: false on the datasource
+      # (least-privilege datasource). Stays a NAMED volume, never a host bind
+      # mount: WAL's -shm index needs fcntl locks that virtiofs/9P don't
+      # forward, and the whole point of the volume is dodging that bug.
+      - enphase_data:/enphase-ledger:ro
     ports:
       - "3000:3000"
     restart: unless-stopped

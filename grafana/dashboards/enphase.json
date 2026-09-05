@@ -5,10 +5,39 @@
   "timezone": "browser",
   "editable": true,
   "schemaVersion": 39,
-  "version": 2,
+  "version": 4,
   "refresh": "30s",
   "time": { "from": "now-6h", "to": "now" },
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": [
+      {
+        "name": "Mode changes",
+        "datasource": { "type": "frser-sqlite-datasource", "uid": "enphase-ledger" },
+        "enable": true,
+        "hide": false,
+        "iconColor": "green",
+        "target": {
+          "refId": "Anno",
+          "queryText": "SELECT ts AS time, target AS title, COALESCE(reason, '') AS text FROM writes WHERE action = 'set_mode' AND outcome = 'success' AND ts >= strftime('%Y-%m-%dT%H:%M:%fZ', $__from / 1000.0, 'unixepoch') AND ts <= strftime('%Y-%m-%dT%H:%M:%fZ', $__to / 1000.0, 'unixepoch') ORDER BY ts",
+          "rawQueryText": "SELECT ts AS time, target AS title, COALESCE(reason, '') AS text FROM writes WHERE action = 'set_mode' AND outcome = 'success' AND ts >= strftime('%Y-%m-%dT%H:%M:%fZ', $__from / 1000.0, 'unixepoch') AND ts <= strftime('%Y-%m-%dT%H:%M:%fZ', $__to / 1000.0, 'unixepoch') ORDER BY ts",
+          "timeColumns": ["time"]
+        }
+      },
+      {
+        "name": "Write failures",
+        "datasource": { "type": "frser-sqlite-datasource", "uid": "enphase-ledger" },
+        "enable": true,
+        "hide": false,
+        "iconColor": "red",
+        "target": {
+          "refId": "Anno",
+          "queryText": "SELECT ts AS time, action || ' ' || outcome AS title, COALESCE(reason, '') || CASE WHEN error_class IS NOT NULL THEN ' [' || error_class || ']' ELSE '' END AS text FROM writes WHERE outcome IN ('rejected', 'error') AND ts >= strftime('%Y-%m-%dT%H:%M:%fZ', $__from / 1000.0, 'unixepoch') AND ts <= strftime('%Y-%m-%dT%H:%M:%fZ', $__to / 1000.0, 'unixepoch') ORDER BY ts",
+          "rawQueryText": "SELECT ts AS time, action || ' ' || outcome AS title, COALESCE(reason, '') || CASE WHEN error_class IS NOT NULL THEN ' [' || error_class || ']' ELSE '' END AS text FROM writes WHERE outcome IN ('rejected', 'error') AND ts >= strftime('%Y-%m-%dT%H:%M:%fZ', $__from / 1000.0, 'unixepoch') AND ts <= strftime('%Y-%m-%dT%H:%M:%fZ', $__to / 1000.0, 'unixepoch') ORDER BY ts",
+          "timeColumns": ["time"]
+        }
+      }
+    ]
+  },
   "templating": { "list": [] },
   "panels": [
     {

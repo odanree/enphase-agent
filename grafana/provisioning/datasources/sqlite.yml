@@ -1,0 +1,16 @@
+# Least-privilege datasource: Grafana gets exactly one file, opened with the
+# plugin's default PRAGMA query_only=1, on a volume mounted :ro in compose.
+# editable: false is the third layer — nobody clicking around in Grafana can
+# reconfigure this to point at a writable path or drop the pragma. Grafana
+# is a WAL *reader* alongside the daemon (the single writer); it never owns
+# the journal.
+apiVersion: 1
+
+datasources:
+  - name: EnphaseLedger
+    type: frser-sqlite-datasource
+    uid: enphase-ledger
+    access: proxy
+    jsonData:
+      path: /enphase-ledger/enphase.db
+    editable: false
