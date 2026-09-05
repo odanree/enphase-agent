@@ -16,6 +16,11 @@
         "enable": true,
         "hide": false,
         "iconColor": "green",
+        "mappings": {
+          "title": { "source": "field", "value": "title" },
+          "text": { "source": "field", "value": "text" },
+          "time": { "source": "field", "value": "time" }
+        },
         "target": {
           "refId": "Anno",
           "queryText": "SELECT ts AS time, target AS title, COALESCE(reason, '') AS text FROM writes WHERE action = 'set_mode' AND outcome = 'success' AND ts >= strftime('%Y-%m-%dT%H:%M:%fZ', $__from / 1000.0, 'unixepoch') AND ts <= strftime('%Y-%m-%dT%H:%M:%fZ', $__to / 1000.0, 'unixepoch') ORDER BY ts",
@@ -29,6 +34,11 @@
         "enable": true,
         "hide": false,
         "iconColor": "red",
+        "mappings": {
+          "title": { "source": "field", "value": "title" },
+          "text": { "source": "field", "value": "text" },
+          "time": { "source": "field", "value": "time" }
+        },
         "target": {
           "refId": "Anno",
           "queryText": "SELECT ts AS time, action || ' ' || outcome AS title, COALESCE(reason, '') || CASE WHEN error_class IS NOT NULL THEN ' [' || error_class || ']' ELSE '' END AS text FROM writes WHERE outcome IN ('rejected', 'error') AND ts >= strftime('%Y-%m-%dT%H:%M:%fZ', $__from / 1000.0, 'unixepoch') AND ts <= strftime('%Y-%m-%dT%H:%M:%fZ', $__to / 1000.0, 'unixepoch') ORDER BY ts",
