@@ -9,6 +9,12 @@ metrics daemon that dies on the failure it exists to report is useless.
 Read/write path separation: this process only ever reads the gateway.
 Writes stay behind CLI + policy; nothing reachable from Grafana or
 Prometheus can actuate the battery.
+
+The same separation holds for the audit ledger: the daemon is a reader
+only. Each iteration it republishes the ledger's trailing-24h counts as
+`enphase_writes_last_24h` — the audit trail as a materialized view — so
+writes made by one-shot CLI processes reach Prometheus through the one
+process it scrapes.
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ from prometheus_client import start_http_server
 
 from .adapter import EnphaseAdapter
 from .errors import AuthError, CircuitOpen, StaleStateError
+from .ledger import Ledger
 from .metrics import METRICS, Metrics
 from .models import SystemState
 
@@ -61,10 +68,21 @@ def _publish_state(state: SystemState, metrics: Metrics, now: datetime) -> None:
     metrics.state_age_seconds.set(max(0.0, (now - state.ts).total_seconds()))
 
 
+async def _publish_ledger(ledger: Ledger, metrics: Metrics) -> None:
+    """Refresh the materialized view. Same per-iteration bulkhead as the
+    gateway read: a ledger hiccup is logged, the gauge keeps its last value
+    (LazyGauge semantics), and the loop continues."""
+    try:
+        metrics.publish_write_counts(await ledger.counts_by_label_last_24h())
+    except Exception as exc:
+        logger.warning("ledger read failed; enphase_writes_last_24h not refreshed: %s", exc)
+
+
 async def scrape_once(
     adapter: EnphaseAdapter,
     metrics: Metrics = METRICS,
     now_fn: Callable[[], datetime] = _utcnow,
+    ledger: Ledger | None = None,
 ) -> None:
     """One loop iteration. Never raises — the bulkhead lives here so the
     caller's loop stays a dumb `while`."""
@@ -81,6 +99,10 @@ async def scrape_once(
     finally:
         metrics.scrape_duration_seconds.observe(time.perf_counter() - started)
         metrics.circuit_breaker_open.set(1.0 if adapter.is_circuit_open() else 0.0)
+        # Independent of gateway health on purpose: the audit view must stay
+        # current even while the breaker is open.
+        if ledger is not None:
+            await _publish_ledger(ledger, metrics)
 
 
 async def run_daemon(
@@ -90,6 +112,7 @@ async def run_daemon(
     port: int = DEFAULT_PORT,
     metrics: Metrics = METRICS,
     now_fn: Callable[[], datetime] = _utcnow,
+    ledger: Ledger | None = None,
 ) -> None:
     """Serve /metrics on 0.0.0.0:`port` and scrape every `interval_s`.
 
@@ -97,6 +120,10 @@ async def run_daemon(
     the in-flight iteration finishes, the adapter's aiohttp session is
     closed, and the process leaves with 0 — `docker stop` never has to
     escalate to SIGKILL.
+
+    `ledger` arrives already opened — the CLI owns its lifecycle (async
+    context manager) so a ledger that can't open fails the boot before
+    /metrics is ever served, rather than being discovered mid-loop.
     """
     start_http_server(port)
     logger.info("metrics endpoint up on :%d/metrics, scraping every %.0fs", port, interval_s)
@@ -113,7 +140,7 @@ async def run_daemon(
 
     try:
         while not stop.is_set():
-            await scrape_once(adapter, metrics, now_fn)
+            await scrape_once(adapter, metrics, now_fn, ledger)
             try:
                 await asyncio.wait_for(stop.wait(), timeout=interval_s)
             except TimeoutError:

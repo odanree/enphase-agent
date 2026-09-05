@@ -26,6 +26,7 @@ Copy `.env.example` and fill in:
 | `ENPHASE_PASSWORD` | Enlighten account password |
 | `ENPHASE_GATEWAY_HOST` | LAN IP/host of the IQ Gateway |
 | `ENPHASE_SERIAL` | Gateway serial number |
+| `ENPHASE_DB_PATH` | SQLite audit ledger path. Compose sets `/data/enphase.db`; unset locally → `./enphase.db` |
 
 ## Usage
 
@@ -37,6 +38,7 @@ enphase-agent set-reserve 0.30
 enphase-agent plan            # tomorrow's schedule from the rules engine
 enphase-agent plan --storm    # what the plan looks like under a storm forecast
 enphase-agent daemon          # metrics daemon: /metrics on :8000, scrape every 15s
+enphase-agent ledger          # last 20 write attempts from the audit ledger
 ```
 
 ## Docker
@@ -80,7 +82,8 @@ One-shot CLI commands still work alongside the daemon: `docker compose run --rm 
 | `enphase_scrape_errors_total{kind=...}` | Counter | `increase(enphase_scrape_errors_total[1h])` | Failures by kind: auth, circuit_open, stale, other (RED: **E**rrors) |
 | `enphase_scrape_duration_seconds` | Histogram | `histogram_quantile(0.95, rate(enphase_scrape_duration_seconds_bucket[5m]))` | `get_state` latency (RED: **D**uration) |
 | `enphase_circuit_breaker_open` | Gauge | `enphase_circuit_breaker_open == 1` | 1 while the adapter's breaker is failing fast |
-| `enphase_writes_total{action,outcome}` | Counter | `sum by (outcome) (increase(enphase_writes_total[24h]))` | Battery write attempts through the policy layer — the audit trail |
+| `enphase_writes_total{action,outcome}` | Counter | `sum by (outcome) (increase(enphase_writes_total[24h]))` | Battery write attempts made **by this process**. The daemon never writes, so on the daemon this stays 0 — see the ledger gauge below |
+| `enphase_writes_last_24h{action,outcome}` | Gauge | `enphase_writes_last_24h{outcome="rejected"}` | Write attempts in the trailing 24h **across every process**, read from the audit ledger each scrape (materialized view) |
 | `enphase_energy_produced_today_watt_hours` | Gauge | `enphase_energy_produced_today_watt_hours / 1000` | Solar energy since local midnight (gateway accumulator; resets daily — that reset is why it's a Gauge, not a Counter) |
 | `enphase_energy_produced_7d_watt_hours` | Gauge | `enphase_energy_produced_7d_watt_hours / 1000` | Solar energy over the previous 7 days, excluding today (rolling window) |
 | `enphase_energy_produced_lifetime_watt_hours` | Gauge | `rate(enphase_energy_produced_lifetime_watt_hours[1h])` | Lifetime solar energy. Monotonic at the source but exported as a Gauge — we mirror the value rather than own the increments, and `_total` on a Gauge would mislead; `rate()` works on it regardless |
@@ -132,6 +135,49 @@ The pattern stops scaling when cardinality does. If this stack ever grew to thou
 
 Service metrics follow the **RED method** — Rate (`enphase_scrape_total`), Errors (`enphase_scrape_errors_total`, subclassed by kind), Duration (`enphase_scrape_duration_seconds`) — which answers "is the agent healthy" independently of the **domain gauges** (production, SoC, mode), which answer "is the house healthy". Everything is **pull-based**: the daemon exposes `/metrics` and Prometheus scrapes it, so a dead monitoring stack costs the agent nothing and a dead agent shows up as a down target. **Cardinality discipline**: every label value comes from a closed vocabulary enforced in `metrics.py` — no free-form strings, because one timestamp-in-a-label mistake mints a new time series per scrape. And the stack is **read/write path separated**: Grafana and Prometheus can only ever read — battery writes still flow exclusively through CLI → policy → adapter, so a compromised dashboard can observe your battery but can never drain your reserve.
 
+## Audit ledger
+
+Every battery write attempt — allowed, rejected, or failed — is appended to a SQLite database at `ENPHASE_DB_PATH` (`/data/enphase.db` in the container, on the `enphase_data` named volume). One table, `writes`, in WAL mode:
+
+| Column | Meaning |
+|---|---|
+| `ts` | UTC ISO 8601 (`2026-09-04T22:15:03.421Z`) |
+| `action` | `set_mode` / `set_reserve` / `storm_guard` |
+| `outcome` | `success` / `rejected` / `error` |
+| `target` | new mode name, reserve fraction, or bool as string |
+| `reason` | the caller's `--reason`, plus the rejection message when rejected |
+| `error_class` | exception class name when `outcome=error` |
+
+### Why it exists
+
+1. **The CLI↔daemon audit gap.** `enphase_writes_total` is a per-process Prometheus counter, but writes happen in one-shot CLI processes (`docker compose run --rm enphase-agent set-mode …`) while Prometheus scrapes the long-running daemon. The scraped process never performs a write, so its counter was permanently 0. The ledger is the durable state both share: CLI processes append, the daemon reads the trailing 24h back every scrape and exports it as `enphase_writes_last_24h{action,outcome}`.
+2. **Bulkhead persistence.** The 4-mode-changes-per-day guard used to be a Python list — which meant every CLI invocation (a fresh process) started at zero, and the bulkhead only ever guarded a single process's lifetime. It is now a query over today's committed rows, so it holds across CLI invocations and container restarts.
+3. **A substrate for the planner.** A future LLM planner can read "what did I do recently, and why" from one table instead of reconstructing it from logs.
+
+### Patterns in play
+
+**WAL for concurrent-reader-single-writer semantics.** `PRAGMA journal_mode=WAL` lets the daemon read while a CLI process commits — readers see the last committed snapshot and never block on the writer. Two CLI processes racing serialize on SQLite's single write lock for the milliseconds a commit takes (`timeout` on the connection makes that a short wait, not a "database is locked" error). This is the classic shared-state contention point and it's fine here because the bulkhead caps writes at a handful per day. WAL's `-shm` index depends on fcntl locks, which is exactly why `/data` is a named volume and not a bind mount.
+
+**Audit trail as a materialized view.** The daemon doesn't own write counts; it re-derives `enphase_writes_last_24h` from the ledger every iteration — same shape as the Prometheus recording rules above, one layer lower.
+
+**Write-through instrumentation.** `BatteryPolicy` records each attempt from one call site that fans out to both sinks (metrics counter + ledger row), so the two can never disagree about what was attempted.
+
+**Bulkhead persistence, with asymmetric failure handling.** The bulkhead *check* (ledger read) fails closed — if the daily budget can't be verified, the write is refused. The audit *record* (ledger write) fails open — a completed control action is never turned into an error because the audit sink hiccuped, since the caller's retry would be a second real battery write. The daemon fails fast at boot if the ledger can't open (an audit-less daemon can't do its job) but degrades gracefully if a read fails mid-loop (the gauge keeps its last value, the scrape continues).
+
+### Usage
+
+```sh
+docker compose run --rm enphase-agent ledger --limit 50
+```
+
+The slim image ships no `sqlite3` binary, so for ad-hoc SQL use the stdlib module in the running daemon container:
+
+```sh
+docker compose exec enphase-agent python -c "import sqlite3; [print(r) for r in sqlite3.connect('/data/enphase.db').execute('SELECT ts, action, outcome, target, reason FROM writes ORDER BY ts DESC LIMIT 5')]"
+```
+
+Locally (with `sqlite3` installed): `sqlite3 enphase.db "SELECT * FROM writes ORDER BY ts DESC LIMIT 5"`.
+
 ## Architecture
 
 **Anti-corruption layer** (`adapter.py`). The adapter is the only module that knows Enphase's shapes; callers see our `SystemState` / `BatteryMode`. When Enphase renames a field or pyenphase changes its models, the blast radius is one file.
@@ -144,7 +190,7 @@ Service metrics follow the **RED method** — Rate (`enphase_scrape_total`), Err
 
 **Idempotency.** `set_battery_mode` reads current state first and no-ops if the mode already matches. Battery mode writes are expensive (relay/inverter reconfiguration); retries and redundant schedules shouldn't burn them.
 
-**Bulkhead** (`policy.py`). Max 4 mode changes per day, so a runaway caller flaps the policy layer, not the battery. In-memory for now; SQLite persistence is the next PR.
+**Bulkhead** (`policy.py`). Max 4 mode changes per day, so a runaway caller flaps the policy layer, not the battery. The count is a query over the SQLite audit ledger, so it persists across CLI invocations and container restarts (see [Audit ledger](#audit-ledger)).
 
 **HITL gate.** `FULL_BACKUP` needs an explicit `confirm=True` (CLI: `--confirm`). It's the one mode that visibly changes household behavior (stops self-consumption, charges from grid), so a human stays in the loop.
 
@@ -156,4 +202,4 @@ Service metrics follow the **RED method** — Rate (`enphase_scrape_total`), Err
 uv run pytest
 ```
 
-pyenphase is mocked entirely; no hardware or network needed.
+pyenphase is mocked entirely; no hardware or network needed. The ledger tests use a real on-disk SQLite file per test (`tmp_path`, never `:memory:` — WAL needs a filesystem), so they exercise actual locking and snapshot isolation.

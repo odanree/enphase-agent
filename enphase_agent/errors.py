@@ -21,3 +21,9 @@ class PolicyRejected(EnphaseAgentError):
 
 class CircuitOpen(EnphaseAgentError):
     """Breaker is open; the gateway gets a rest before we try again."""
+
+
+class LedgerError(EnphaseAgentError):
+    """The audit ledger could not be opened or used. Fatal at daemon boot
+    (fail-fast at the trust boundary); logged-and-tolerated on the write
+    path (audit failure must not block a control action)."""

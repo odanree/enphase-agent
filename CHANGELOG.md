@@ -2,6 +2,13 @@
 
 ## [0.1.0] - unreleased
 
+- SQLite audit ledger (`ledger.py`, `aiosqlite`):
+  - One `writes` table at `ENPHASE_DB_PATH` (`/data/enphase.db` on the named volume), WAL mode — concurrent-reader-single-writer safe across the CLI/daemon process boundary. `CREATE IF NOT EXISTS` only; no migration framework until a second schema shape exists.
+  - `BatteryPolicy`'s per-day mode-change bulkhead now persists across process boundaries and container restarts (previously an in-memory list that reset on every CLI invocation). The bulkhead check fails closed on a ledger read error; the audit record fails open (logged) so an audit hiccup can't turn a completed battery write into a retried one.
+  - Write-through instrumentation: one `BatteryPolicy` call site fans out to both `enphase_writes_total` and the ledger; the recorder signature grew `target` / `reason` / `error_class` (dropped by the metrics sink — cardinality discipline).
+  - Daemon publishes `enphase_writes_last_24h{action,outcome}` from the ledger every scrape (audit trail as materialized view, zero-filled over the closed label vocabulary), closing the daemon-can't-see-CLI-writes gap that left the Grafana audit metric permanently 0. Ledger open failure at daemon boot is fatal (fail-fast at the trust boundary); a read failure mid-loop is logged and the gauge keeps its last value.
+  - New `enphase-agent ledger [--limit N]` CLI command (read-only Rich table). `LazyGauge` gained optional labels.
+
 - Historical / cumulative metrics + "Today at a glance" dashboard row:
   - Historical energy metrics from pyenphase accumulators: today / 7d / lifetime watt-hours for production and consumption (`EnvoySystemConsumption` confirmed to carry the same accumulator shape as production; consumption series only exist on CT-metered gateways).
   - Battery energy metrics: `enphase_battery_energy_available_watt_hours` (usable now) and `enphase_battery_energy_capacity_watt_hours` (nameplate), from the Encharge aggregate.

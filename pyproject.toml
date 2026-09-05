@@ -13,6 +13,7 @@ dependencies = [
     "httpx>=0.27",
     "python-dotenv>=1.0",
     "prometheus_client>=0.20",
+    "aiosqlite>=0.20",
 ]
 
 [project.scripts]
@@ -67,8 +68,15 @@ strict_equality = true
 
 # Strict on the observability path too: a mistyped label dict or a str
 # where a float belongs would only surface at scrape time otherwise.
+# Ledger + policy join the list: a str/datetime mix-up in the bulkhead
+# window would silently widen or shrink the daily budget.
 [[tool.mypy.overrides]]
-module = ["enphase_agent.metrics", "enphase_agent.daemon"]
+module = [
+    "enphase_agent.metrics",
+    "enphase_agent.daemon",
+    "enphase_agent.ledger",
+    "enphase_agent.policy",
+]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 disallow_any_generics = true

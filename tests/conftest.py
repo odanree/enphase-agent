@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,6 +10,7 @@ import pytest
 from pyenphase.exceptions import EnvoyAuthenticationError
 
 from enphase_agent.adapter import _MODE_TO_ENPHASE, EnphaseAdapter
+from enphase_agent.ledger import Ledger
 from enphase_agent.models import BatteryMode
 
 
@@ -114,6 +116,19 @@ def envoy() -> FakeEnvoy:
 @pytest.fixture
 def data_factory() -> Callable[..., SimpleNamespace]:
     return make_envoy_data
+
+
+@pytest.fixture
+def db_path(tmp_path: Path) -> Path:
+    # A real file, never ":memory:": WAL needs a filesystem for its -wal/-shm
+    # sidecars, and the whole point is exercising real SQLite locking.
+    return tmp_path / "enphase.db"
+
+
+@pytest.fixture
+async def ledger(db_path: Path, clock: Clock) -> AsyncIterator[Ledger]:
+    async with Ledger(db_path, now_fn=clock) as ledger:
+        yield ledger
 
 
 @pytest.fixture

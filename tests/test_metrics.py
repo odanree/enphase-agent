@@ -14,6 +14,7 @@ from prometheus_client import CollectorRegistry, generate_latest
 
 from enphase_agent.daemon import scrape_once
 from enphase_agent.errors import AuthError, CircuitOpen, StaleStateError
+from enphase_agent.ledger import Ledger
 from enphase_agent.metrics import Metrics, build_metrics
 from enphase_agent.models import BatteryMode, SystemState
 
@@ -215,3 +216,72 @@ async def test_state_age_reflects_clock_gap(metrics: Metrics) -> None:
     await scrape_once(adapter, metrics, now_fn=lambda: now)  # type: ignore[arg-type]
 
     assert sample(metrics, "enphase_state_age_seconds") == pytest.approx(42.0)
+
+
+async def test_writes_last_24h_publishes_from_ledger_counts(
+    metrics: Metrics, ledger: Ledger, clock
+) -> None:
+    """Audit-trail-as-materialized-view: rows written by "another process"
+    (here: directly into the ledger, bypassing this process's counter) show
+    up on the daemon's gauge after one scrape."""
+    now = clock.now
+    clock.now = now - timedelta(hours=30)
+    await ledger.record(action="set_mode", outcome="success")  # outside the window
+    clock.now = now - timedelta(hours=2)
+    await ledger.record(action="set_mode", outcome="success")
+    await ledger.record(action="set_mode", outcome="success")
+    await ledger.record(action="set_reserve", outcome="rejected")
+    clock.now = now
+
+    await scrape_once(FakeAdapter(), metrics, now_fn=clock, ledger=ledger)  # type: ignore[arg-type]
+
+    name = "enphase_writes_last_24h"
+    assert sample(metrics, name, {"action": "set_mode", "outcome": "success"}) == 2.0
+    assert sample(metrics, name, {"action": "set_reserve", "outcome": "rejected"}) == 1.0
+    # Zero-filled across the closed vocabulary once the ledger has been read.
+    assert sample(metrics, name, {"action": "storm_guard", "outcome": "error"}) == 0.0
+    # This process's own counter never saw those writes — that's the gap
+    # the gauge closes.
+    assert (
+        sample(metrics, "enphase_writes_total", {"action": "set_mode", "outcome": "success"}) == 0.0
+    )
+
+
+async def test_writes_last_24h_refreshes_even_when_scrape_fails(
+    metrics: Metrics, ledger: Ledger, clock
+) -> None:
+    await ledger.record(action="set_mode", outcome="success")
+    adapter = FakeAdapter(error=CircuitOpen("open"), circuit_open=True)
+    await scrape_once(adapter, metrics, now_fn=clock, ledger=ledger)  # type: ignore[arg-type]
+
+    assert (
+        sample(metrics, "enphase_writes_last_24h", {"action": "set_mode", "outcome": "success"})
+        == 1.0
+    )
+
+
+async def test_writes_last_24h_absent_without_ledger(metrics: Metrics) -> None:
+    await scrape_once(FakeAdapter(), metrics)  # type: ignore[arg-type]
+
+    assert (
+        sample(metrics, "enphase_writes_last_24h", {"action": "set_mode", "outcome": "success"})
+        is None
+    )
+    assert "enphase_writes_last_24h{" not in generate_latest(metrics.registry).decode()
+
+
+async def test_writes_last_24h_survives_ledger_read_failure(
+    metrics: Metrics, ledger: Ledger, clock
+) -> None:
+    # Graceful degradation on the runtime path: the gauge keeps its last
+    # value and the scrape still completes.
+    await ledger.record(action="set_mode", outcome="success")
+    await scrape_once(FakeAdapter(), metrics, now_fn=clock, ledger=ledger)  # type: ignore[arg-type]
+    await ledger.close()
+    await scrape_once(FakeAdapter(), metrics, now_fn=clock, ledger=ledger)  # type: ignore[arg-type]
+
+    assert (
+        sample(metrics, "enphase_writes_last_24h", {"action": "set_mode", "outcome": "success"})
+        == 1.0
+    )
+    assert sample(metrics, "enphase_scrape_total", {"outcome": "success"}) == 2.0

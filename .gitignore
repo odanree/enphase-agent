@@ -19,3 +19,8 @@ venv/
 .idea/
 .vscode/
 *.swp
+
+# Audit ledger (local dev default is ./enphase.db) + WAL sidecar files
+*.db
+*.db-wal
+*.db-shm

@@ -22,13 +22,16 @@ process-wide singleton `METRICS` lives on the default registry that
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import logging
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from prometheus_client import REGISTRY, CollectorRegistry, Counter, Gauge, Histogram
 from prometheus_client.core import GaugeMetricFamily
 
 from .models import BatteryMode, SystemState
+
+logger = logging.getLogger(__name__)
 
 SCRAPE_OUTCOMES: frozenset[str] = frozenset({"success", "error"})
 ERROR_KINDS: frozenset[str] = frozenset({"auth", "circuit_open", "stale", "other"})
@@ -54,26 +57,44 @@ class LazyGauge:
     last value persists across a transiently missing upstream field — same
     graceful-degradation contract as the adapter's stale cache, with
     `enphase_state_age_seconds` as the freshness signal.
+
+    Optionally labeled: `set(value, **labels)` keys one child per label
+    tuple, and the whole family stays absent until the first child is set.
     """
 
-    def __init__(self, name: str, documentation: str, registry: CollectorRegistry) -> None:
+    def __init__(
+        self,
+        name: str,
+        documentation: str,
+        registry: CollectorRegistry,
+        labelnames: tuple[str, ...] = (),
+    ) -> None:
         self._name = name
         self._documentation = documentation
-        self._value: float | None = None
+        self._labelnames = labelnames
+        self._values: dict[tuple[str, ...], float] = {}
         registry.register(self)
 
-    def set(self, value: float) -> None:
-        self._value = float(value)
+    def set(self, value: float, **labels: str) -> None:
+        if set(labels) != set(self._labelnames):
+            raise ValueError(
+                f"{self._name}: expected labels {self._labelnames}, got {tuple(labels)}"
+            )
+        key = tuple(labels[name] for name in self._labelnames)
+        self._values[key] = float(value)
 
     def describe(self) -> Iterable[GaugeMetricFamily]:
         # Lets the registry learn our name at register() time without
         # collect() emitting a sample before the first real value.
-        return [GaugeMetricFamily(self._name, self._documentation)]
+        return [GaugeMetricFamily(self._name, self._documentation, labels=list(self._labelnames))]
 
     def collect(self) -> Iterable[GaugeMetricFamily]:
-        if self._value is None:
+        if not self._values:
             return []
-        return [GaugeMetricFamily(self._name, self._documentation, value=self._value)]
+        family = GaugeMetricFamily(self._name, self._documentation, labels=list(self._labelnames))
+        for key, value in sorted(self._values.items()):
+            family.add_metric(list(key), value)
+        return [family]
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +128,11 @@ class Metrics:
     battery_energy_capacity_wh: LazyGauge
     grid_import_watts: LazyGauge
     grid_export_watts: LazyGauge
+    # Materialized view over the audit ledger: the daemon republishes the
+    # ledger's trailing-24h counts every scrape, so writes performed by
+    # one-shot CLI processes become visible to Prometheus through the one
+    # process it actually scrapes.
+    writes_last_24h: LazyGauge
     registry: CollectorRegistry = field(default_factory=CollectorRegistry)
 
     def set_battery_mode(self, active: BatteryMode) -> None:
@@ -147,14 +173,43 @@ class Metrics:
             if value is not None:
                 gauge.set(value)
 
-    def record_write(self, action: str, outcome: str) -> None:
+    def record_write(
+        self,
+        action: str,
+        outcome: str,
+        *,
+        target: str | None = None,
+        reason: str | None = None,
+        error_class: str | None = None,
+    ) -> None:
         """The audit-trail counter the policy layer bumps. Vocabulary is
-        enforced here so a future caller can't mint labels per invocation."""
+        enforced here so a future caller can't mint labels per invocation.
+
+        `target` / `reason` / `error_class` are accepted for signature
+        parity with the ledger (write-through instrumentation: one call
+        site, two sinks) and deliberately dropped — free-form strings never
+        become labels (cardinality discipline)."""
         if action not in WRITE_ACTIONS:
             raise ValueError(f"unknown write action {action!r}")
         if outcome not in WRITE_OUTCOMES:
             raise ValueError(f"unknown write outcome {outcome!r}")
         self.writes_total.labels(action=action, outcome=outcome).inc()
+
+    def publish_write_counts(self, counts: Mapping[tuple[str, str], int]) -> None:
+        """Republish the ledger's 24h aggregate. Every (action, outcome) in
+        the closed vocabulary is set — zero-filled — so "no rejections
+        today" reads as an honest 0 rather than an absent series once the
+        ledger has been consulted at all. A label pair outside the
+        vocabulary (a row from some other version of this code) is skipped
+        with a warning instead of minting a series."""
+        for key in counts:
+            if key[0] not in WRITE_ACTIONS or key[1] not in WRITE_OUTCOMES:
+                logger.warning("ledger row with unknown label pair %r skipped", key)
+        for action in WRITE_ACTIONS:
+            for outcome in WRITE_OUTCOMES:
+                self.writes_last_24h.set(
+                    float(counts.get((action, outcome), 0)), action=action, outcome=outcome
+                )
 
 
 def build_metrics(registry: CollectorRegistry | None = None) -> Metrics:
@@ -273,6 +328,13 @@ def build_metrics(registry: CollectorRegistry | None = None) -> Metrics:
             "Power pushed to the grid right now (>= 0). At most one of "
             "import/export is nonzero by construction.",
             registry=reg,
+        ),
+        writes_last_24h=LazyGauge(
+            "enphase_writes_last_24h",
+            "Battery write attempts in the trailing 24h, read from the audit ledger "
+            "(counts writes from every process, not just this one).",
+            registry=reg,
+            labelnames=("action", "outcome"),
         ),
         registry=reg,
     )
