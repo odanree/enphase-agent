@@ -55,6 +55,29 @@ async def test_bulkhead_resets_next_day(policy, clock):
     await policy.set_battery_mode(BatteryMode.SAVINGS, reason="test")
 
 
+async def test_noop_does_not_consume_bulkhead(policy, fake_adapter, writes):
+    # Adapter signals "already in that mode, no gateway write happened".
+    # Four such calls used to exhaust the day; now they must not.
+    fake_adapter.set_battery_mode.return_value = False
+    for _ in range(10):
+        await policy.set_battery_mode(BatteryMode.SELF_CONSUMPTION, reason="noop test")
+    assert all(outcome == "noop" for _, outcome in writes)
+    # Bulkhead budget untouched — a real change is still allowed.
+    fake_adapter.set_battery_mode.return_value = True
+    await policy.set_battery_mode(BatteryMode.SAVINGS, reason="real change")
+    assert writes[-1] == ("set_mode", "success")
+
+
+async def test_noop_audits_ledger_with_noop_outcome(ledger_policy, fake_adapter, ledger):
+    # Ledger fan-out mirrors the metrics side: noop-outcome rows land in
+    # the audit trail, so an LLM planner can see "I kept trying but it
+    # was already set" — but they don't count toward count_since("success").
+    fake_adapter.set_battery_mode.return_value = False
+    await ledger_policy.set_battery_mode(BatteryMode.SELF_CONSUMPTION, reason="already there")
+    rows = await ledger.recent(5)
+    assert [(r.action, r.outcome) for r in rows] == [("set_mode", "noop")]
+
+
 async def test_full_backup_without_confirm_rejected(policy, fake_adapter):
     with pytest.raises(PolicyRejected, match="confirm"):
         await policy.set_battery_mode(BatteryMode.FULL_BACKUP, reason="storm")

@@ -90,7 +90,11 @@ class BatteryPolicy:
         self, mode: BatteryMode, reason: str, *, confirm: bool = False
     ) -> None:
         """HITL gate on FULL_BACKUP plus a daily change bulkhead — batteries
-        don't enjoy being mode-flapped by a buggy scheduler."""
+        don't enjoy being mode-flapped by a buggy scheduler.
+
+        A redundant call (already in `mode`) audits with `outcome="noop"` and
+        does NOT count toward the daily bulkhead: the budget exists to cap
+        real state changes, not repeated intent."""
         target = mode.value
         try:
             if mode is BatteryMode.FULL_BACKUP and not confirm:
@@ -101,7 +105,7 @@ class BatteryPolicy:
                 raise PolicyRejected(
                     f"bulkhead: {self.MAX_MODE_CHANGES_PER_DAY} mode changes already today"
                 )
-            await self._adapter.set_battery_mode(mode, reason)
+            wrote = await self._adapter.set_battery_mode(mode, reason)
         except PolicyRejected as exc:
             await self._audit("set_mode", "rejected", target=target, reason=f"{reason} ({exc})")
             raise
@@ -114,8 +118,11 @@ class BatteryPolicy:
                 error_class=type(exc).__name__,
             )
             raise
-        await self._audit("set_mode", "success", target=target, reason=reason)
-        if self._ledger is None:
+        outcome = "success" if wrote else "noop"
+        await self._audit("set_mode", outcome, target=target, reason=reason)
+        # Bulkhead in-memory fallback only tracks real state changes, same
+        # as the ledger-backed count_since query filters on outcome=success.
+        if self._ledger is None and wrote:
             self._mode_changes.append(self._now())
 
     async def set_reserve_soc(self, pct: float, reason: str) -> None:

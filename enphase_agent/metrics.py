@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 SCRAPE_OUTCOMES: frozenset[str] = frozenset({"success", "error"})
 ERROR_KINDS: frozenset[str] = frozenset({"auth", "circuit_open", "stale", "other"})
 WRITE_ACTIONS: frozenset[str] = frozenset({"set_mode", "set_reserve", "storm_guard"})
-WRITE_OUTCOMES: frozenset[str] = frozenset({"success", "rejected", "error"})
+WRITE_OUTCOMES: frozenset[str] = frozenset({"success", "rejected", "error", "noop"})
 
 # Local-LAN calls to an embedded gateway: p50 well under a second, with a
 # long tail when the gateway is choking. Buckets bracket both regimes.

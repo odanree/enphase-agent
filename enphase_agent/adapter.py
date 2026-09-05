@@ -183,17 +183,24 @@ class EnphaseAdapter:
         self._cache = state
         return state
 
-    async def set_battery_mode(self, mode: BatteryMode, reason: str) -> None:
-        """Idempotent: a write is only spent when the mode actually differs."""
+    async def set_battery_mode(self, mode: BatteryMode, reason: str) -> bool:
+        """Idempotent: a write is only spent when the mode actually differs.
+
+        Returns True when the gateway was actually written to, False on a
+        no-op. The signal lets the policy layer skip counting a redundant
+        call against the daily bulkhead — otherwise four repeated
+        set-mode calls could exhaust the budget without ever touching
+        the battery."""
         state = await self._require_fresh_state()
         if state.battery_mode is mode:
             logger.info("set_battery_mode no-op (already %s): %s", mode.name, reason)
-            return
+            return False
         logger.info(
             "set_battery_mode %s -> %s: %s", state.battery_mode.name, mode.name, reason
         )
         envoy = await self._ready_envoy()
         await self._call(envoy.set_storage_mode, _MODE_TO_ENPHASE[mode])
+        return True
 
     async def set_reserve_soc(self, pct: float, reason: str) -> None:
         """Fraction in, integer percent out — the unit translation stays in the ACL."""
